@@ -96,16 +96,12 @@ This PHPA acts like a Horizontal Pod Autoscaler and autoscales to try and keep t
 
 ## Installation
 
-Build and install this fork's online-training release from the same checkout so the image and CRD stay aligned:
+The operator for managing Predictive Horizontal Pod Autoscalers can be installed using Helm:
 
 ```bash
-VERSION=v0.14.0-online.1
+VERSION=v0.13.2
 HELM_CHART=predictive-horizontal-pod-autoscaler-operator
-docker build --tag itsmekhoathekid/predictive-horizontal-pod-autoscaler:${VERSION} .
-helm upgrade --install ${HELM_CHART} ./helm \
-  --set image.repository=itsmekhoathekid/predictive-horizontal-pod-autoscaler \
-  --set image.tag=${VERSION} \
-  --set leaderElection.enabled=true
+helm install ${HELM_CHART} https://github.com/jthomperoo/predictive-horizontal-pod-autoscaler/releases/download/${VERSION}/predictive-horizontal-pod-autoscaler-${VERSION}.tgz
 ```
 
 ## Quick start

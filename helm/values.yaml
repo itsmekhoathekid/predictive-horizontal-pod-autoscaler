@@ -2,8 +2,8 @@ mode: cluster
 replicaCount: 1
 
 image:
-  repository: itsmekhoathekid/predictive-horizontal-pod-autoscaler
-  tag: v0.14.0-online.1
+  repository: jthomperoo/predictive-horizontal-pod-autoscaler
+  tag: ""
   pullPolicy: IfNotPresent
 
 leaderElection:

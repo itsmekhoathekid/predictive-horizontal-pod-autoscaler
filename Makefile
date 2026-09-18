@@ -1,6 +1,6 @@
-REGISTRY = itsmekhoathekid
+REGISTRY = jthomperoo
 NAME = predictive-horizontal-pod-autoscaler
-VERSION = v0.14.0-online.1
+VERSION = latest
 CONTROLLER_GEN = $(shell go env GOPATH)/bin/controller-gen
 
 LOCAL_HELM_CHART_NAME=predictive-horizontal-pod-autoscaler-operator

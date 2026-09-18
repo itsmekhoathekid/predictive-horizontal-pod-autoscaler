@@ -88,6 +88,26 @@ def test_linear_regression(subtests):
             }"""
     }, {
         "description":
+        "Constant history does not create a floating point phantom replica",
+        "expected_status_code":
+        0,
+        "expected_stderr":
+        "",
+        "expected_stdout":
+        "1",
+        "stdin":
+        """{
+                "lookAhead": 10000,
+                "currentTime": "2020-02-01T00:56:12Z",
+                "replicaHistory": [
+                    {"replicas": 1, "time": "2020-02-01T00:55:33Z"},
+                    {"replicas": 1, "time": "2020-02-01T00:55:43Z"},
+                    {"replicas": 1, "time": "2020-02-01T00:55:53Z"},
+                    {"replicas": 1, "time": "2020-02-01T00:56:03Z"}
+                ]
+            }"""
+    }, {
+        "description":
         "Successful prediction, now",
         "expected_status_code":
         0,

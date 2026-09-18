@@ -33,8 +33,16 @@ const (
 )
 
 const (
-	TypeHoltWinters = "HoltWinters"
-	TypeLinear      = "Linear"
+	TypeHoltWinters  = "HoltWinters"
+	TypeLinear       = "Linear"
+	TypeOnlineLinear = "OnlineLinear"
+)
+
+const (
+	OnlineUpdateDatapoint = "datapoint"
+	OnlineUpdateMinibatch = "minibatch"
+	OnlineModeActive      = "active"
+	OnlineModeObserve     = "observe"
 )
 
 const (
@@ -69,10 +77,48 @@ type Linear struct {
 	// there will only be a maxmimu of 6 stored timestamped replica counts for this model.
 	// +kubebuilder:validation:Minimum=1
 	HistorySize int `json:"historySize"`
-	// lookAhead is how far in the future should the linear regression predict in seconds. For example a value of 10
-	// will predict 10 seconds into the future
+	// lookAhead is how far in the future the linear regression predicts in milliseconds. For example a value of 10000
+	// predicts 10 seconds into the future.
 	// +kubebuilder:validation:Minimum=1
 	LookAhead int `json:"lookAhead"`
+}
+
+// OnlineLinear represents an incrementally trained linear regression model.
+type OnlineLinear struct {
+	// lookAhead is how far in the future the model predicts, in milliseconds.
+	// +kubebuilder:validation:Minimum=1
+	LookAhead int `json:"lookAhead"`
+
+	// updateMode controls whether observations update the model immediately or in minibatches.
+	// +kubebuilder:validation:Enum=datapoint;minibatch
+	// +optional
+	UpdateMode *string `json:"updateMode,omitempty"`
+
+	// batchSize is one for datapoint mode and at least two for minibatch mode.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	BatchSize *int `json:"batchSize,omitempty"`
+
+	// learningRate is the SGD learning rate.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	LearningRate *float64 `json:"learningRate,omitempty"`
+
+	// warmupSamples is the number of trained samples required before predictions become active.
+	// +kubebuilder:validation:Minimum=2
+	// +optional
+	WarmupSamples *int64 `json:"warmupSamples,omitempty"`
+
+	// checkpointInterval controls how often in-memory state is persisted to the PHPA ConfigMap.
+	// +optional
+	CheckpointInterval *metav1.Duration `json:"checkpointInterval,omitempty"`
+
+	// mode controls whether predictions affect scaling or are only observed.
+	// +kubebuilder:validation:Enum=active;observe
+	// +optional
+	Mode *string `json:"mode,omitempty"`
 }
 
 // HoltWinters represents a holt-winters exponential smoothing prediction model configuration
@@ -125,7 +171,7 @@ type HoltWinters struct {
 type Model struct {
 	// type is the type of the model, for example 'Linear'. To see a full list of supported model types visit
 	// https://predictive-horizontal-pod-autoscaler.readthedocs.io/en/latest/user-guide/models/.
-	// +kubebuilder:validation:Enum=Linear;HoltWinters
+	// +kubebuilder:validation:Enum=Linear;HoltWinters;OnlineLinear
 	Type string `json:"type"`
 
 	// name is the name of the model, this can be any arbitrary name and is just used to distinguish between models if
@@ -169,6 +215,10 @@ type Model struct {
 	// +optional
 	Linear *Linear `json:"linear"`
 
+	// onlineLinear is the configuration for an incrementally trained linear model.
+	// +optional
+	OnlineLinear *OnlineLinear `json:"onlineLinear,omitempty"`
+
 	// holtWinters is the configuration to use for the holt winters model, it will only be used if the type is set to
 	// 'HoltWinters'
 	// +optional
@@ -185,6 +235,14 @@ type TimestampedReplicas struct {
 
 // PredictiveHorizontalPodAutoscalerData is the data storage format for the PHPA, this is stored in a ConfigMap
 type PredictiveHorizontalPodAutoscalerData struct {
+	// schemaVersion identifies the persisted state format. Missing values are legacy version 1.
+	// +optional
+	SchemaVersion int `json:"schemaVersion,omitempty"`
+
+	// lastCheckpointTime records when this state was last persisted.
+	// +optional
+	LastCheckpointTime *metav1.Time `json:"lastCheckpointTime,omitempty"`
+
 	// modelHistories is a mapping of model names to model histories. This allows looking up a model's model history,
 	// while allowing all of the model histories for a single PHPA to be stored in a single place.
 	ModelHistories map[string]ModelHistory `json:"modelHistories"`
@@ -204,6 +262,40 @@ type ModelHistory struct {
 	// no data will be recorded and the model will be skipped.
 	// +optional
 	StartTime *metav1.Time `json:"startTime"`
+
+	// onlineLinearState holds incremental model parameters and bounded pending data.
+	// +optional
+	OnlineLinearState *OnlineLinearState `json:"onlineLinearState,omitempty"`
+}
+
+// OnlineLinearSample is a timestamped training sample waiting for a minibatch update.
+type OnlineLinearSample struct {
+	Time     *metav1.Time `json:"time"`
+	Replicas int32        `json:"replicas"`
+}
+
+// OnlineLinearForecast is retained until its target time so prequential error can be measured.
+type OnlineLinearForecast struct {
+	TargetTime *metav1.Time `json:"targetTime"`
+	Replicas   int32        `json:"replicas"`
+}
+
+// OnlineLinearState is the durable state for one OnlineLinear model.
+type OnlineLinearState struct {
+	Generation          string                 `json:"generation"`
+	OriginTime          *metav1.Time           `json:"originTime,omitempty"`
+	Intercept           float64                `json:"intercept"`
+	Coefficient         float64                `json:"coefficient"`
+	SamplesSeen         int64                  `json:"samplesSeen"`
+	TrainedSamples      int64                  `json:"trainedSamples"`
+	UpdatesApplied      int64                  `json:"updatesApplied"`
+	PendingSamples      []OnlineLinearSample   `json:"pendingSamples,omitempty"`
+	PendingForecasts    []OnlineLinearForecast `json:"pendingForecasts,omitempty"`
+	AbsoluteErrorSum    float64                `json:"absoluteErrorSum"`
+	EvaluatedForecasts  int64                  `json:"evaluatedForecasts"`
+	LastObservationTime *metav1.Time           `json:"lastObservationTime,omitempty"`
+	LastUpdateTime      *metav1.Time           `json:"lastUpdateTime,omitempty"`
+	LastPrediction      *int32                 `json:"lastPrediction,omitempty"`
 }
 
 // PredictiveHorizontalPodAutoscalerSpec defines the desired state of PredictiveHorizontalPodAutoscaler
@@ -327,6 +419,28 @@ type PredictiveHorizontalPodAutoscalerStatus struct {
 	// +listType=atomic
 	// +optional
 	CurrentMetrics []autoscalingv2.MetricStatus `json:"currentMetrics"`
+
+	// modelStatuses exposes readiness and diagnostics for configured prediction models.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ModelStatuses []ModelStatus `json:"modelStatuses,omitempty"`
+}
+
+// ModelStatus reports the observed state of a prediction model without exposing its weights.
+type ModelStatus struct {
+	Name               string       `json:"name"`
+	Type               string       `json:"type"`
+	Ready              bool         `json:"ready"`
+	SamplesSeen        int64        `json:"samplesSeen,omitempty"`
+	UpdatesApplied     int64        `json:"updatesApplied,omitempty"`
+	PendingSamples     int          `json:"pendingSamples,omitempty"`
+	ObservedReplicas   int32        `json:"observedReplicas,omitempty"`
+	LastPrediction     *int32       `json:"lastPrediction,omitempty"`
+	MeanAbsoluteError  *float64     `json:"meanAbsoluteError,omitempty"`
+	LastUpdateTime     *metav1.Time `json:"lastUpdateTime,omitempty"`
+	LastCheckpointTime *metav1.Time `json:"lastCheckpointTime,omitempty"`
+	Reason             string       `json:"reason,omitempty"`
 }
 
 // +kubebuilder:object:root=true

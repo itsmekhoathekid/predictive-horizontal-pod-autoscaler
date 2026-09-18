@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/scale"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,8 +41,11 @@ import (
 
 	"github.com/jthomperoo/k8shorizmetrics/v2"
 	jamiethompsonmev1alpha1 "github.com/jthomperoo/predictive-horizontal-pod-autoscaler/api/v1alpha1"
+	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/observability"
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction"
+	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction/onlinelinear"
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/scalebehavior"
+	modelstate "github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/state"
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/validation"
 )
 
@@ -88,11 +92,13 @@ const (
 // PredictiveHorizontalPodAutoscalerReconciler reconciles a PredictiveHorizontalPodAutoscaler object
 type PredictiveHorizontalPodAutoscalerReconciler struct {
 	client.Client
-	ScaleClient scale.ScalesGetter
-	Scheme      *runtime.Scheme
-	Gatherer    k8shorizmetrics.Gatherer
-	Evaluator   k8shorizmetrics.Evaluator
-	Predicter   prediction.Predicter
+	ScaleClient           scale.ScalesGetter
+	Scheme                *runtime.Scheme
+	Gatherer              k8shorizmetrics.Gatherer
+	Evaluator             k8shorizmetrics.Evaluator
+	Predicter             prediction.Predicter
+	OnlineLinearPredicter onlinelinear.Processor
+	StateCache            *modelstate.Cache
 }
 
 //+kubebuilder:rbac:groups=jamiethompson.me,resources=predictivehorizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
@@ -105,6 +111,7 @@ type PredictiveHorizontalPodAutoscalerReconciler struct {
 //+kubebuilder:rbac:groups=metrics.k8s.io,resources=*,verbs=get;list
 //+kubebuilder:rbac:groups=custom.metrics.k8s.io,resources=*,verbs=get;list
 //+kubebuilder:rbac:groups=external.metrics.k8s.io,resources=*,verbs=get;list
+//+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -113,6 +120,9 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Cont
 	err := r.Client.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
+			if r.StateCache != nil {
+				r.StateCache.Delete(req.NamespacedName)
+			}
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
@@ -169,6 +179,7 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Cont
 				UID:        instance.UID,
 			}})
 
+			phpaData.SchemaVersion = modelstate.SchemaVersion
 			phpaData.ModelHistories = map[string]jamiethompsonmev1alpha1.ModelHistory{}
 
 			data, err := json.Marshal(phpaData)
@@ -195,11 +206,22 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Cont
 		return reconcile.Result{RequeueAfter: defaultErrorRetryPeriod}, err
 	}
 
+	forceCheckpoint := false
 	err = json.Unmarshal([]byte(configMap.Data[configMapDataKey]), phpaData)
 	if err != nil {
-		logger.Error(err, "failed to parse PHPA data", "scaleTargetRef", scaleTargetRef)
-		return reconcile.Result{RequeueAfter: defaultErrorRetryPeriod}, err
+		logger.Error(err, "failed to parse PHPA data, resetting persisted model state", "scaleTargetRef", scaleTargetRef)
+		phpaData = &jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscalerData{
+			SchemaVersion:  modelstate.SchemaVersion,
+			ModelHistories: map[string]jamiethompsonmev1alpha1.ModelHistory{},
+		}
+		forceCheckpoint = true
 	}
+	if r.StateCache == nil {
+		r.StateCache = modelstate.NewCache()
+	}
+	var migrated bool
+	phpaData, migrated = r.StateCache.Load(req.NamespacedName, phpaData)
+	forceCheckpoint = forceCheckpoint || migrated
 
 	syncPeriod := defaultSyncPeriod
 	if instance.Spec.SyncPeriod != nil {
@@ -247,14 +269,26 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Cont
 
 	// This function doesn't return any errors, since if it fails to process a model it will skip and continue
 	// processing without that model's results
-	predictedReplicas, phpaData := r.processModels(ctx, instance, phpaData, now, scale.Spec.Replicas,
-		calculatedReplicas)
+	predictedReplicas, phpaData, modelStatuses, modelForceCheckpoint, checkpointInterval := r.processModels(
+		ctx, instance, phpaData, now, scale.Spec.Replicas, calculatedReplicas)
+	forceCheckpoint = forceCheckpoint || modelForceCheckpoint
+	r.StateCache.Put(req.NamespacedName, phpaData)
 
-	err = r.updateConfigMapData(ctx, configMap, phpaData)
-	if err != nil {
-		logger.Error(err, "failed to update PHPA configmap",
-			"scaleTargetRef", scaleTargetRef)
-		return reconcile.Result{RequeueAfter: defaultErrorRetryPeriod}, err
+	if r.StateCache.CheckpointDue(req.NamespacedName, now, checkpointInterval, forceCheckpoint) {
+		checkpointData := phpaData.DeepCopy()
+		checkpointData.SchemaVersion = modelstate.SchemaVersion
+		checkpointData.LastCheckpointTime = &metav1.Time{Time: now}
+		err = r.updateConfigMapData(ctx, configMap, checkpointData)
+		if err != nil {
+			logger.Error(err, "failed to checkpoint PHPA model state",
+				"scaleTargetRef", scaleTargetRef)
+			return reconcile.Result{RequeueAfter: defaultErrorRetryPeriod}, err
+		}
+		phpaData = r.StateCache.MarkCheckpoint(req.NamespacedName, checkpointData, now)
+		observability.StateCheckpoints.WithLabelValues(instance.Namespace, instance.Name).Inc()
+	}
+	for i := range modelStatuses {
+		modelStatuses[i].LastCheckpointTime = phpaData.LastCheckpointTime
 	}
 
 	decisionType := defaultDecisionType
@@ -344,6 +378,7 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Cont
 	instance.Status.CurrentReplicas = scale.Spec.Replicas
 	instance.Status.ScaleDownReplicaHistory = scaleDownReplicaHistory
 	instance.Status.ScaleUpReplicaHistory = scaleUpReplicaHistory
+	instance.Status.ModelStatuses = modelStatuses
 	err = r.Client.Status().Update(ctx, instance)
 	if err != nil {
 		logger.Error(err, "failed to update status of resource",
@@ -372,15 +407,41 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) updateConfigMapData(ctx co
 		panic(err)
 	}
 
-	configMap.Data = map[string]string{
-		configMapDataKey: string(data),
-	}
-
-	err = r.Client.Update(ctx, configMap)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1.ConfigMap{}
+		if getErr := r.Client.Get(ctx, types.NamespacedName{Name: configMap.Name, Namespace: configMap.Namespace}, current); getErr != nil {
+			return getErr
+		}
+		current.Data = map[string]string{configMapDataKey: string(data)}
+		return r.Client.Update(ctx, current)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update config map data: %w", err)
 	}
 
+	return nil
+}
+
+// FlushState persists all cached model state. It is intended as a best-effort graceful shutdown hook.
+func (r *PredictiveHorizontalPodAutoscalerReconciler) FlushState(ctx context.Context) error {
+	if r.StateCache == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	for key, data := range r.StateCache.Snapshot() {
+		checkpointData := data.DeepCopy()
+		checkpointData.SchemaVersion = modelstate.SchemaVersion
+		checkpointData.LastCheckpointTime = &metav1.Time{Time: now}
+		configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("predictive-horizontal-pod-autoscaler-%s-data", key.Name),
+			Namespace: key.Namespace,
+		}}
+		if err := r.updateConfigMapData(ctx, configMap, checkpointData); err != nil {
+			return err
+		}
+		r.StateCache.MarkCheckpoint(key, checkpointData, now)
+		observability.StateCheckpoints.WithLabelValues(key.Namespace, key.Name).Inc()
+	}
 	return nil
 }
 
@@ -389,7 +450,8 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) updateConfigMapData(ctx co
 func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.Context,
 	instance *jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscaler,
 	phpaData *jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscalerData, now time.Time, currentReplicas int32,
-	calculatedReplicas int32) ([]int32, *jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscalerData) {
+	calculatedReplicas int32) ([]int32, *jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscalerData,
+	[]jamiethompsonmev1alpha1.ModelStatus, bool, time.Duration) {
 
 	logger := log.FromContext(ctx)
 
@@ -397,6 +459,10 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.
 
 	// Set up a slice with the calculated replicas as the first prediction
 	predictedReplicas := []int32{calculatedReplicas}
+	modelStatuses := []jamiethompsonmev1alpha1.ModelStatus{}
+	forceCheckpoint := false
+	checkpointInterval := time.Minute
+	hasOnlineModel := false
 
 	// Add the calculated replicas to a list of past replicas
 	for _, model := range instance.Spec.Models {
@@ -407,6 +473,17 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.
 		perSyncPeriod := defaultPerSyncPeriod
 		if model.PerSyncPeriod != nil {
 			perSyncPeriod = *model.PerSyncPeriod
+		}
+
+		if model.Type == jamiethompsonmev1alpha1.TypeOnlineLinear {
+			config, configErr := onlinelinear.Defaults(&model)
+			if configErr == nil && (!hasOnlineModel || config.CheckpointInterval < checkpointInterval) {
+				checkpointInterval = config.CheckpointInterval
+			}
+			hasOnlineModel = true
+		} else {
+			// Legacy models persist replica history on every synchronization period.
+			forceCheckpoint = true
 		}
 
 		modelHistory, exists := phpaData.ModelHistories[model.Name]
@@ -445,8 +522,25 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.
 			}
 		}
 
+		if model.Type == jamiethompsonmev1alpha1.TypeOnlineLinear && model.ResetDuration != nil &&
+			model.StartInterval != nil && modelHistory.OnlineLinearState != nil &&
+			modelHistory.OnlineLinearState.LastObservationTime != nil &&
+			now.Sub(modelHistory.OnlineLinearState.LastObservationTime.Time) > model.ResetDuration.Duration {
+			startTime := nextInterval(now, model.StartInterval.Duration)
+			modelHistory.OnlineLinearState = nil
+			modelHistory.StartTime = &metav1.Time{Time: startTime}
+			phpaData.ModelHistories[model.Name] = modelHistory
+			forceCheckpoint = true
+			logger.V(1).Info("Resetting OnlineLinear state and waiting for the next start interval",
+				"scaleTargetRef", scaleTargetRef,
+				"startTime", startTime,
+				"model", model.Name)
+			continue
+		}
+
 		// Calculate if it's been too long since the last data recorded
-		if model.ResetDuration != nil && len(modelHistory.ReplicaHistory) > 0 {
+		if model.Type != jamiethompsonmev1alpha1.TypeOnlineLinear &&
+			model.ResetDuration != nil && len(modelHistory.ReplicaHistory) > 0 {
 			latest := modelHistory.ReplicaHistory[0].Time.Time
 			for _, timestampedReplica := range modelHistory.ReplicaHistory {
 				if timestampedReplica.Time.After(latest) {
@@ -491,6 +585,87 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.
 		}
 
 		shouldRunOnThisSyncPeriod := modelHistory.SyncPeriodsPassed >= perSyncPeriod
+
+		if model.Type == jamiethompsonmev1alpha1.TypeOnlineLinear {
+			status := jamiethompsonmev1alpha1.ModelStatus{
+				Name: model.Name,
+				Type: model.Type,
+			}
+			if r.OnlineLinearPredicter == nil {
+				status.Reason = "ProcessorUnavailable"
+				modelStatuses = append(modelStatuses, status)
+				observability.OnlineFallbacks.WithLabelValues(instance.Namespace, instance.Name, model.Name).Inc()
+				continue
+			}
+
+			previousUpdates := int64(0)
+			if modelHistory.OnlineLinearState != nil {
+				previousUpdates = modelHistory.OnlineLinearState.UpdatesApplied
+			}
+			observation := jamiethompsonmev1alpha1.TimestampedReplicas{
+				Time:     &metav1.Time{Time: now},
+				Replicas: calculatedReplicas,
+			}
+			result, processErr := r.OnlineLinearPredicter.Process(&model, modelHistory, observation,
+				shouldRunOnThisSyncPeriod)
+			if processErr != nil {
+				logger.Error(processErr, "failed to update OnlineLinear model",
+					"scaleTargetRef", scaleTargetRef,
+					"model", model.Name)
+				status.Reason = "ProcessingError"
+				modelStatuses = append(modelStatuses, status)
+				observability.OnlineFallbacks.WithLabelValues(instance.Namespace, instance.Name, model.Name).Inc()
+				continue
+			}
+
+			modelHistory = result.History
+			if shouldRunOnThisSyncPeriod {
+				modelHistory.SyncPeriodsPassed = 1
+			} else {
+				modelHistory.SyncPeriodsPassed++
+			}
+			phpaData.ModelHistories[model.Name] = modelHistory
+			forceCheckpoint = forceCheckpoint || result.ForceCheckpoint
+
+			state := modelHistory.OnlineLinearState
+			status.Ready = result.Ready
+			status.SamplesSeen = state.SamplesSeen
+			status.UpdatesApplied = state.UpdatesApplied
+			status.PendingSamples = len(state.PendingSamples)
+			status.ObservedReplicas = calculatedReplicas
+			status.LastPrediction = state.LastPrediction
+			status.MeanAbsoluteError = result.MeanAbsoluteError
+			status.LastUpdateTime = state.LastUpdateTime
+			status.Reason = "WarmingUp"
+			if result.Ready {
+				status.Reason = "Ready"
+			}
+
+			config, _ := onlinelinear.Defaults(&model)
+			if result.Prediction != nil {
+				observability.OnlinePrediction.WithLabelValues(instance.Namespace, instance.Name, model.Name).
+					Set(float64(*result.Prediction))
+				if config.Mode == jamiethompsonmev1alpha1.OnlineModeActive {
+					predictedReplicas = append(predictedReplicas, *result.Prediction)
+				} else {
+					status.Reason = "ObserveOnly"
+				}
+			}
+			observability.OnlineSamples.WithLabelValues(instance.Namespace, instance.Name, model.Name).Inc()
+			if state.UpdatesApplied > previousUpdates {
+				observability.OnlineUpdates.WithLabelValues(instance.Namespace, instance.Name, model.Name).
+					Add(float64(state.UpdatesApplied - previousUpdates))
+			}
+			if result.Reset {
+				observability.OnlineResets.WithLabelValues(instance.Namespace, instance.Name, model.Name).Inc()
+			}
+			if result.MeanAbsoluteError != nil {
+				observability.OnlineMAE.WithLabelValues(instance.Namespace, instance.Name, model.Name).
+					Set(*result.MeanAbsoluteError)
+			}
+			modelStatuses = append(modelStatuses, status)
+			continue
+		}
 
 		modelHistory.ReplicaHistory = append(modelHistory.ReplicaHistory, jamiethompsonmev1alpha1.TimestampedReplicas{
 			Time: &metav1.Time{
@@ -550,7 +725,10 @@ func (r *PredictiveHorizontalPodAutoscalerReconciler) processModels(ctx context.
 		}
 	}
 
-	return predictedReplicas, phpaData
+	if !hasOnlineModel {
+		checkpointInterval = 0
+	}
+	return predictedReplicas, phpaData, modelStatuses, forceCheckpoint, checkpointInterval
 }
 
 // calculateReplicas does the HPA processing part of the autoscaling based on the metrics provided in the spec,

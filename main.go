@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"time"
@@ -36,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/jthomperoo/k8shorizmetrics/v2"
 	"github.com/jthomperoo/k8shorizmetrics/v2/metricsclient"
@@ -48,6 +50,8 @@ import (
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction"
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction/holtwinters"
 	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction/linear"
+	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction/onlinelinear"
+	modelstate "github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/state"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -127,7 +131,7 @@ func main() {
 	pyRunner := algorithm.NewAlgorithmPython()
 	httpExec := &http.Execute{}
 
-	if err = (&controllers.PredictiveHorizontalPodAutoscalerReconciler{
+	reconciler := &controllers.PredictiveHorizontalPodAutoscalerReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		ScaleClient: scaleClient,
@@ -144,8 +148,23 @@ func main() {
 				},
 			},
 		},
-	}).SetupWithManager(mgr); err != nil {
+		OnlineLinearPredicter: &onlinelinear.Predict{},
+		StateCache:            modelstate.NewCache(),
+	}
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PredictiveHorizontalPodAutoscaler")
+		os.Exit(1)
+	}
+	if err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if flushErr := reconciler.FlushState(flushCtx); flushErr != nil {
+			setupLog.Error(flushErr, "unable to flush model state during shutdown")
+		}
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to register model state shutdown flush")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

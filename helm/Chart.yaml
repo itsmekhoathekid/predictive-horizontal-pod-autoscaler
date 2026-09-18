@@ -4,4 +4,5 @@ description: The Predictive Horizontal Pod Autoscaler Operator allows deployment
 
 type: application
 
-version: 0.0.0
+version: 0.14.0-online.1
+appVersion: "v0.14.0-online.1"

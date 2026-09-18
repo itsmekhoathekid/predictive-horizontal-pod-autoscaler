@@ -47,6 +47,7 @@ versions we will try to fix them, but there is no guarantee of support.
 * Choice of statistical models to apply over Horizontal Pod Autoscaler replica counting logic.
   * Holt-Winters Smoothing
   * Linear Regression
+  * Online Linear Regression with datapoint or minibatch SGD updates
 * Allows customisation of Kubernetes autoscaling options without master node access. Can therefore work on managed
 solutions such as EKS or GCP.
   * CPU Initialization Period.
@@ -95,12 +96,16 @@ This PHPA acts like a Horizontal Pod Autoscaler and autoscales to try and keep t
 
 ## Installation
 
-The operator for managing Predictive Horizontal Pod Autoscalers can be installed using Helm:
+Build and install this fork's online-training release from the same checkout so the image and CRD stay aligned:
 
 ```bash
-VERSION=v0.13.2
+VERSION=v0.14.0-online.1
 HELM_CHART=predictive-horizontal-pod-autoscaler-operator
-helm install ${HELM_CHART} https://github.com/jthomperoo/predictive-horizontal-pod-autoscaler/releases/download/${VERSION}/predictive-horizontal-pod-autoscaler-${VERSION}.tgz
+docker build --tag itsmekhoathekid/predictive-horizontal-pod-autoscaler:${VERSION} .
+helm upgrade --install ${HELM_CHART} ./helm \
+  --set image.repository=itsmekhoathekid/predictive-horizontal-pod-autoscaler \
+  --set image.tag=${VERSION} \
+  --set leaderElection.enabled=true
 ```
 
 ## Quick start

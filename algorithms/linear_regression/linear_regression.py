@@ -112,4 +112,4 @@ model = sm.OLS(y, x).fit()
 
 # Predict the value at the search time (0), include the constant (1).
 # The search time is 0 as the values used in training are search time - evaluation time, so the search time will be 0
-print(math.ceil(model.predict([[1, 0]])[0]), end="")
+print(math.ceil(model.predict([[1, 0]])[0] - 1e-9), end="")

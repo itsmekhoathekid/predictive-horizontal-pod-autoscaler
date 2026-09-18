@@ -833,9 +833,9 @@ spec:
                           minimum: 1
                           type: integer
                         lookAhead:
-                          description: lookAhead is how far in the future should the
-                            linear regression predict in seconds. For example a value
-                            of 10 will predict 10 seconds into the future
+                          description: lookAhead is how far in the future the linear
+                            regression predicts in milliseconds. For example a value
+                            of 10000 predicts 10 seconds into the future.
                           minimum: 1
                           type: integer
                       required:
@@ -848,6 +848,53 @@ spec:
                         if you have multiple and to keep track of model data if you
                         modify your model parameters.
                       type: string
+                    onlineLinear:
+                      description: onlineLinear is the configuration for an incrementally
+                        trained linear model.
+                      properties:
+                        batchSize:
+                          description: batchSize is one for datapoint mode and at
+                            least two for minibatch mode.
+                          minimum: 1
+                          type: integer
+                        checkpointInterval:
+                          description: checkpointInterval controls how often in-memory
+                            state is persisted to the PHPA ConfigMap.
+                          type: string
+                        learningRate:
+                          description: learningRate is the SGD learning rate.
+                          exclusiveMinimum: true
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                        lookAhead:
+                          description: lookAhead is how far in the future the model
+                            predicts, in milliseconds.
+                          minimum: 1
+                          type: integer
+                        mode:
+                          description: mode controls whether predictions affect scaling
+                            or are only observed.
+                          enum:
+                          - active
+                          - observe
+                          type: string
+                        updateMode:
+                          description: updateMode controls whether observations update
+                            the model immediately or in minibatches.
+                          enum:
+                          - datapoint
+                          - minibatch
+                          type: string
+                        warmupSamples:
+                          description: warmupSamples is the number of trained samples
+                            required before predictions become active.
+                          format: int64
+                          minimum: 2
+                          type: integer
+                      required:
+                      - lookAhead
+                      type: object
                     perSyncPeriod:
                       description: perSyncPeriod is how frequently this model will
                         run, with the syncPeriod as a base unit. This allows for you
@@ -882,6 +929,7 @@ spec:
                       enum:
                       - Linear
                       - HoltWinters
+                      - OnlineLinear
                       type: string
                   required:
                   - name
@@ -1377,6 +1425,52 @@ spec:
                   often the number of pods is changed.
                 format: date-time
                 type: string
+              modelStatuses:
+                description: modelStatuses exposes readiness and diagnostics for configured
+                  prediction models.
+                items:
+                  description: ModelStatus reports the observed state of a prediction
+                    model without exposing its weights.
+                  properties:
+                    lastCheckpointTime:
+                      format: date-time
+                      type: string
+                    lastPrediction:
+                      format: int32
+                      type: integer
+                    lastUpdateTime:
+                      format: date-time
+                      type: string
+                    meanAbsoluteError:
+                      type: number
+                    name:
+                      type: string
+                    observedReplicas:
+                      format: int32
+                      type: integer
+                    pendingSamples:
+                      type: integer
+                    ready:
+                      type: boolean
+                    reason:
+                      type: string
+                    samplesSeen:
+                      format: int64
+                      type: integer
+                    type:
+                      type: string
+                    updatesApplied:
+                      format: int64
+                      type: integer
+                  required:
+                  - name
+                  - ready
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               reference:
                 description: reference is the resource being referenced and targeted
                   for scaling.

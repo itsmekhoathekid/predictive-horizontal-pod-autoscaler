@@ -1,1 +1,15 @@
 mode: cluster
+replicaCount: 1
+
+image:
+  repository: itsmekhoathekid/predictive-horizontal-pod-autoscaler
+  tag: v0.14.0-online.1
+  pullPolicy: IfNotPresent
+
+leaderElection:
+  enabled: true
+
+metrics:
+  service:
+    enabled: true
+    port: 8080

@@ -13,8 +13,10 @@
 # limitations under the License.
 
 # Build the manager binary
-FROM golang:1.20 as builder
+FROM golang:1.20 AS builder
 
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
@@ -27,7 +29,7 @@ RUN go mod download
 COPY . .
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o manager main.go
 
 FROM python:3.8-slim-buster
 WORKDIR /app

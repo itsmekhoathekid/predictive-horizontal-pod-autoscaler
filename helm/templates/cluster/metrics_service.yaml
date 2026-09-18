@@ -1,0 +1,15 @@
+{{ if and (eq .Values.mode "cluster") .Values.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-metrics
+  labels:
+    name: {{ .Chart.Name }}
+spec:
+  selector:
+    name: {{ .Chart.Name }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.service.port }}
+      targetPort: metrics
+{{ end }}

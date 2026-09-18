@@ -1,6 +1,7 @@
-REGISTRY = jthomperoo
+REGISTRY = itsmekhoathekid
 NAME = predictive-horizontal-pod-autoscaler
-VERSION = latest
+VERSION = v0.14.0-online.1
+CONTROLLER_GEN = $(shell go env GOPATH)/bin/controller-gen
 
 LOCAL_HELM_CHART_NAME=predictive-horizontal-pod-autoscaler-operator
 
@@ -20,6 +21,7 @@ lint: generate
 	@echo "=============Linting============="
 	go run honnef.co/go/tools/cmd/staticcheck@v0.4.2 ./...
 	pylint algorithms --rcfile=.pylintrc
+	helm lint helm
 
 format:
 	@echo "=============Formatting============="
@@ -40,8 +42,8 @@ docker:
 
 generate: get_controller-gen
 	@echo "=============Generating Golang and YAML============="
-	controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
-	controller-gen rbac:roleName=predictive-horizontal-pod-autoscaler webhook crd:allowDangerousTypes=true \
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	$(CONTROLLER_GEN) rbac:roleName=predictive-horizontal-pod-autoscaler webhook crd:allowDangerousTypes=true \
 		paths="./..." \
 		output:crd:artifacts:config=helm/templates/crd \
 		output:rbac:artifacts:config=helm/templates/cluster \

@@ -6,6 +6,7 @@ require (
 	github.com/cosmtrek/air v1.42.0
 	github.com/google/go-cmp v0.5.9
 	github.com/jthomperoo/k8shorizmetrics/v2 v2.0.1
+	github.com/prometheus/client_golang v1.14.0
 	honnef.co/go/tools v0.4.2
 	k8s.io/api v0.26.2
 	k8s.io/apimachinery v0.26.2
@@ -20,6 +21,7 @@ require (
 	github.com/creack/pty v1.1.18 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.10.1 // indirect
+	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.6.0 // indirect
 	github.com/fatih/color v1.14.1 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
@@ -46,7 +48,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.14.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.8.0 // indirect

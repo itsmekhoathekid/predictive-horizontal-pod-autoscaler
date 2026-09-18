@@ -47,6 +47,45 @@ are `> 6` evaluations, the oldest will be removed.
 For a more detailed example, [see the example in
 `/examples/simple-linear`](https://github.com/jthomperoo/predictive-horizontal-pod-autoscaler/tree/master/examples/simple-linear).
 
+## Online Linear Regression
+
+`OnlineLinear` updates a small linear model in Go without refitting the complete replica history. Every synchronization
+period supplies the current HPA-calculated replica demand as a training observation. `perSyncPeriod` controls how often
+a prediction is emitted, not how often observations are learned.
+
+```yaml
+models:
+  - type: OnlineLinear
+    name: online-linear
+    perSyncPeriod: 1
+    resetDuration: 10m
+    onlineLinear:
+      lookAhead: 10000
+      updateMode: datapoint
+      batchSize: 1
+      learningRate: 0.01
+      warmupSamples: 6
+      checkpointInterval: 1m
+      mode: active
+```
+
+- **lookAhead** is the forecast horizon in milliseconds.
+- **updateMode** is `datapoint` for one SGD update per observation or `minibatch` for an averaged update.
+- **batchSize** must be `1` for datapoint mode and at least `2` for minibatch mode; minibatch defaults to `6`.
+- **learningRate** defaults to `0.01` and must be greater than zero and at most one.
+- **warmupSamples** defaults to `6`; before warmup completes, reactive HPA output is used by itself.
+- **checkpointInterval** defaults to one minute and cannot be shorter than the PHPA sync period. State is cached in
+  memory between ConfigMap checkpoints, so an ungraceful leader failure can lose at most one checkpoint interval plus
+  one sync period.
+- **mode** is `observe` to train and report without affecting scaling, or `active` to include the prediction in the
+  configured decision strategy.
+
+Weights remain private in the owned ConfigMap. Readiness, update counters, the most recent prediction, and prequential
+mean absolute error are exposed under `status.modelStatuses`. Changing settings that alter learned parameter semantics
+starts a new model generation; changing warmup, checkpoint interval, or observe/active mode preserves learned weights.
+Pending minibatches and forecasts are bounded, but all model state for one PHPA still shares one ConfigMap and must fit
+within Kubernetes' 1 MiB ConfigMap size limit. Split very large model sets across PHPAs instead of raising these bounds.
+
 ## Holt-Winters Time Series prediction
 
 The Holt-Winters time series model uses a default calculation timeout of `30000` (30 seconds).

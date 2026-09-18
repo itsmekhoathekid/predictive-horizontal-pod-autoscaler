@@ -19,10 +19,12 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 
 	jamiethompsonmev1alpha1 "github.com/jthomperoo/predictive-horizontal-pod-autoscaler/api/v1alpha1"
+	"github.com/jthomperoo/predictive-horizontal-pod-autoscaler/internal/prediction/onlinelinear"
 )
 
 // Validate performs validation on the PHPA, will return an error if the PHPA is not valid
@@ -34,7 +36,7 @@ func Validate(instance *jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscale
 		return err
 	}
 
-	err = validateModels(spec.Models)
+	err = validateModels(spec.Models, spec.SyncPeriod)
 	if err != nil {
 		return err
 	}
@@ -65,7 +67,12 @@ func validateMinMax(spec jamiethompsonmev1alpha1.PredictiveHorizontalPodAutoscal
 	return nil
 }
 
-func validateModels(models []jamiethompsonmev1alpha1.Model) error {
+func validateModels(models []jamiethompsonmev1alpha1.Model, configuredSyncPeriod *int) error {
+	syncPeriod := 15 * time.Second
+	if configuredSyncPeriod != nil {
+		syncPeriod = time.Duration(*configuredSyncPeriod) * time.Millisecond
+	}
+
 	for _, model := range models {
 		if model.Type == jamiethompsonmev1alpha1.TypeHoltWinters {
 			hw := model.HoltWinters
@@ -86,6 +93,37 @@ func validateModels(models []jamiethompsonmev1alpha1.Model) error {
 		if model.Type == jamiethompsonmev1alpha1.TypeLinear && model.Linear == nil {
 			return fmt.Errorf("invalid model '%s', type is '%s' but no Linear Regression configuration provided",
 				model.Name, model.Type)
+		}
+
+		if model.Type == jamiethompsonmev1alpha1.TypeOnlineLinear {
+			config, err := onlinelinear.Defaults(&model)
+			if err != nil {
+				return fmt.Errorf("invalid model '%s': %w", model.Name, err)
+			}
+			if config.UpdateMode != jamiethompsonmev1alpha1.OnlineUpdateDatapoint &&
+				config.UpdateMode != jamiethompsonmev1alpha1.OnlineUpdateMinibatch {
+				return fmt.Errorf("invalid model '%s', unsupported OnlineLinear updateMode '%s'", model.Name, config.UpdateMode)
+			}
+			if config.UpdateMode == jamiethompsonmev1alpha1.OnlineUpdateDatapoint && config.BatchSize != 1 {
+				return fmt.Errorf("invalid model '%s', datapoint OnlineLinear batchSize must be 1", model.Name)
+			}
+			if config.UpdateMode == jamiethompsonmev1alpha1.OnlineUpdateMinibatch && config.BatchSize < 2 {
+				return fmt.Errorf("invalid model '%s', minibatch OnlineLinear batchSize must be at least 2", model.Name)
+			}
+			if config.LearningRate <= 0 || config.LearningRate > 1 {
+				return fmt.Errorf("invalid model '%s', OnlineLinear learningRate must be greater than 0 and at most 1", model.Name)
+			}
+			if config.WarmupSamples < 2 {
+				return fmt.Errorf("invalid model '%s', OnlineLinear warmupSamples must be at least 2", model.Name)
+			}
+			if config.CheckpointInterval < syncPeriod {
+				return fmt.Errorf("invalid model '%s', OnlineLinear checkpointInterval (%s) cannot be less than syncPeriod (%s)",
+					model.Name, config.CheckpointInterval, syncPeriod)
+			}
+			if config.Mode != jamiethompsonmev1alpha1.OnlineModeActive &&
+				config.Mode != jamiethompsonmev1alpha1.OnlineModeObserve {
+				return fmt.Errorf("invalid model '%s', unsupported OnlineLinear mode '%s'", model.Name, config.Mode)
+			}
 		}
 	}
 	return nil
